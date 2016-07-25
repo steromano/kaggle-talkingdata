@@ -30,19 +30,66 @@ fillna <- function(x, fill) {
   x
 }
 
-## PCA on space of app categories (to reduce the number of categories
-## to something manageable)
-
+## BUILD FEATURES 
 events <- read_data('events')
 app_events <- read_data('app_events')
 app_labels <- read_data('app_labels')
 label_categories <- read_data('label_categories')
 
+# Generic aggregations of all apps ------------
+device_app_counts <- 
+  app_events %>%
+  inner_join(select(events, ends_with('_id'))) %>%
+  group_by(device_id, event_id) %>%
+  summarise(n_installed = n(), n_active = sum(is_active)) %>%
+  group_by(device_id) %>%
+  summarise(
+    n_events = n(),
+    app_min_installed = min(n_installed),
+    app_max_installed = max(n_installed),
+    app_avg_n_active = mean(n_active)
+  ) %>%
+  filter(n_events >= 3) %>%
+  select(-n_events)
+
+# App-level features ------------
 device_apps <-
   app_events %>%
   inner_join(select(events, ends_with('_id'))) %>%
-  select(device_id, app_id) %>%
-  distinct
+  group_by(device_id, app_id) %>%
+  summarise(times_active = sum(is_active)) %>%
+  ungroup
+
+p_rep <- function(x, each) {
+  map2(x, each, rep) %>% unlist
+}
+
+library(FeatureHashing)
+library(slam)
+library(tm)
+library(topicmodels)
+device_bag_of_apps <- 
+  device_apps %>%
+  group_by(device_id) %>%
+  summarise(
+    apps = p_rep(app_id, times_active + 1) %>% paste0(collapse = ',')
+  )
+
+apps_lda <- 
+  device_bag_of_apps %>%
+  hashed.model.matrix(~ split(apps, delim = ',') - 1, ., 2^14) %>%
+  as.matrix %>% 
+  as.DocumentTermMatrix(weighting = weightTf) %>%
+  LDA(k = 10)
+
+device_apps_lda <-
+  data.frame(
+    device_id = device_bag_of_apps$device_id,
+    posterior(apps_lda)$topics %>% set_colnames(paste0('app_topic', 1:10))
+  )
+
+
+
 
 app_categories <-
   app_labels %>%
@@ -95,13 +142,17 @@ device_mobility <-
   filter(abs(longitude) + abs(latitude) > 0) %>%
   group_by(device_id) %>%
   mutate(count = n()) %>%
-  filter(count > 10) %>%
-  summarise(location_var = var(longitude) + var(latitude))
-  
+  filter(count >= 5) %>%
+  summarise(
+    location_var = var(longitude) + var(latitude),
+    location_med_lon = median(longitude),
+    location_med_lat = median(latitude)
+  )
+
 ## Model
 library(xgboost)
 encode_as_integer <- function(x) {
-  as.numeric(factor(x, levels = unique(x)))
+  as.numeric(factor(x, levels = sort(unique(x))))
 }
 
 phone_brand_device_model <- 
@@ -116,6 +167,7 @@ gender_age_train <-
 train_data <-
   gender_age_train %>%
   inner_join(phone_brand_device_model) %>%
+  left_join(device_app_counts) %>%
   left_join(device_categories_pca) %>%
   left_join(device_events_time) %>%
   left_join(device_mobility) %>%
@@ -123,9 +175,10 @@ train_data <-
 
 features <- c(
   'device_model', 'phone_brand', 'brand_device',
-  paste0('appcat_comp', 1:10),
+  paste0('app', 'min_installed', 'max_installed', 'avg_n_active'),
+  paste0('appcat_comp', 1:15),
   paste0('event_tod', 0:5), 'event_all',
-  'location_var'
+  paste0('location_', c('var', 'med_lat', 'med_lon'))
 )
 
 
@@ -163,15 +216,15 @@ params <- list(
   num_class = length(unique(getinfo(dtrain, 'label'))),
   booster = 'gbtree',
   max_depth = 10,
-  eta = 0.01,
+  eta = 0.007,
   subsample = 0.9,
-  colsample_bytree = 0.7
+  colsample_bytree = 0.6
 )
 
-fit <- xgb.train(
+fit_xgb <- xgb.train(
   params = params,
   data = dtrain,
-  nrounds = 2000,
+  nrounds = 3000,
   verbose = 1,
   early.stop.round = 100,
   watchlist = watchlist,
@@ -179,8 +232,38 @@ fit <- xgb.train(
   feval = cross_entropy
 )
 
-saveRDS(fit, 'RDS/fit_xgb.rds')
+saveRDS(fit_xgb, 'RDS/fit_xgb.rds')
 
+library(randomForest)
+fit_rf <- randomForest(
+  x = train_data[-holdout, features],
+  y = as.factor(train_data[-holdout, ]$group),
+  ntree = 1000,
+  mtry = 5,
+  do.trace = TRUE,
+  nodesize = round(nrow(train_data) * 0.0005),
+  importance = TRUE
+)
+
+smooth_probs <- function(probs, gamma = 0.01) {
+  probs %>%
+    + gamma %>%
+    divide_by(rowSums(.))
+}
+
+probs <- 
+  fit_rf %>%
+  predict(train_data[holdout, ], type = 'prob') %>%
+  smooth_probs(gamma = 1/3.5)
+
+cross_entropy <- function(probs, actual) {
+  n <- nrow(probs)
+  1:n %>%
+    map_dbl(~ log(probs[., actual[.]])) %>%
+    sum %>%
+    multiply_by(- 1 / n)
+}
+cross_entropy(probs, train_data[holdout, ]$group)
 
 ## Submission
 
@@ -189,17 +272,18 @@ gender_age_test <- read_data('gender_age_test')
 test_data <-
   gender_age_test %>%
   inner_join(phone_brand_device_model) %>%
+  left_join(device_app_counts) %>%
   left_join(device_categories_pca) %>%
   left_join(device_events_time) %>%
   left_join(device_mobility) %>%
   fillna(-1)
 
-groupmap <- read_data('gender_age_train') %$% group %>% unique
+groupmap <- read_data('gender_age_train') %$% group %>% unique %>% sort
 probs <- 
   test_data %>%
   select_(.dots = features) %>%
   data.matrix %>%
-  predict(fit, .) %>%
+  predict(fit_xgb, .) %>%
   preds_to_probs(12) %>%
   data.frame(test_data$device_id, .) %>%
   set_names(c('device_id', groupmap)) %>%
