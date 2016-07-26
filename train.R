@@ -2,38 +2,38 @@ source('load.R')
 ## Model
 library(xgboost)
 
-phone_brand_device_model <- 
-  read_raw('phone_brand_device_model') %>%
-  mutate(brand_device = paste0(phone_brand, '-', device_model)) %>%
-  # just encode all this stuff as integers
-  mutate_each(funs(encode_as_integer), -device_id)
+
 gender_age_train <- 
   read_raw('gender_age_train') %>%
   mutate_each(funs(encode_as_integer), gender, group)
+device_model_features <- read_clean('device_model_features')
 device_app_features <- read_clean('device_app_features')
 device_event_features <- read_clean('device_event_features')
 
-train_data <-
+train_events_data <-
   gender_age_train %>%
-  left_join(phone_brand_device_model) %>%
-  left_join(device_app_features) %>%
-  left_join(device_event_features) %>%
-  fillna(-1)
+  inner_join(device_model_features) %>%
+  inner_join(device_app_features) %>%
+  inner_join(device_event_features)
 
 features <- c(
   paste0('appcat_comp', 1:30),
   paste0('event_timeslot', c(1, 4, 5)),
-  'brand_device', 'device_model'
+  'phone_brand', 'brand_model'
 )
 
-holdout <- caret::createDataPartition(train_data$group, p = 0.1, list = FALSE)
+holdout <- caret::createDataPartition(
+  train_events_data$group, 
+  p = 0.1, 
+  list = FALSE
+)
 dtrain <- xgb.DMatrix(
-  data = data.matrix(train_data[-holdout, features]), 
-  label = train_data$group[-holdout] - 1
+  data = data.matrix(train_events_data[-holdout, features]), 
+  label = train_events_data$group[-holdout] - 1
 )
 dval <- xgb.DMatrix(
-  data = data.matrix(train_data[holdout, features]), 
-  label = train_data$group[holdout] - 1
+  data = data.matrix(train_events_data[holdout, features]), 
+  label = train_events_data$group[holdout] - 1
 )
 watchlist = list(val = dval, train = dtrain)
 
@@ -41,18 +41,14 @@ preds_to_probs <- function(preds, num_class) {
   preds %>% matrix(nrow = num_class) %>% t
 } 
 
-cross_entropy <- function(preds, dtrain) {
-  labels <- getinfo(dtrain, 'label')
-  probs <- preds_to_probs(preds, num_class = length(unique(labels)))
-  n <- length(labels)
+xgb_cross_entropy <- function(preds, dtrain) {
+  labels <- getinfo(dtrain, 'label') + 1
+  num_class = length(unique(labels))
+  probs <- 
+    preds_to_probs(preds, num_class = num_class) %>%
+    set_colnames(as.character(1:num_class))
   
-  ce <- 
-    1:n %>%
-    map_dbl(~ log(probs[., labels[.] + 1])) %>%
-    sum %>%
-    multiply_by(- 1 / n)
-  
-  list(metric = 'cross_entropy', value = ce)
+  list(metric = 'cross_entropy', value = cross_entropy(probs, labels))
 }
 
 params <- list(
@@ -73,29 +69,39 @@ fit_xgb <- xgb.train(
   early.stop.round = 100,
   watchlist = watchlist,
   maximize = FALSE,
-  feval = cross_entropy
+  feval = xgb_cross_entropy
 )
 
 saveRDS(fit_xgb, 'RDS/fit_xgb.rds')
 
 gender_age_test <- read_raw('gender_age_test')
 
-test_data <-
+test_events_data <-
   gender_age_test %>%
-  inner_join(phone_brand_device_model) %>%
-  left_join(device_event_features) %>%
-  left_join(device_app_features) %>%
-  fillna(-1)
+  inner_join(device_model_features) %>%
+  inner_join(device_event_features) %>%
+  inner_join(device_app_features)
 
 groupmap <- read_raw('gender_age_train') %$% group %>% unique %>% sort
-probs <- 
-  test_data %>%
+test_events_probs <- 
+  test_events_data %>%
   select_(.dots = features) %>%
   data.matrix %>%
   predict(fit_xgb, .) %>%
   preds_to_probs(12) %>%
-  data.frame(test_data$device_id, .) %>%
+  data.frame(test_events_data$device_id, .) %>%
   set_names(c('device_id', groupmap)) %>%
   distinct(device_id, .keep_all = TRUE)
 
-write_csv(probs[, names(read_raw('sample_submission'))], 'xgb_submission.csv')
+test_noevent_probs <- 
+  read_data('predictions/base') %>%
+  filter(! device_id %in% test_events_data$device_id)
+
+probs <- 
+  gender_age_test %>%
+  inner_join(bind_rows(
+    test_events_probs,
+    test_noevent_probs
+  ))
+
+write_csv(probs, 'predictions/xgb_submission.csv')

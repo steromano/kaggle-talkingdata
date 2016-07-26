@@ -38,3 +38,11 @@ fillna <- function(x, fill) {
 encode_as_integer <- function(x) {
   as.numeric(factor(x, levels = sort(unique(x))))
 }
+
+cross_entropy <- function(probs, labels) {
+  labels <- as.character(labels)
+  probs <- as.matrix(probs[, sort(unique(labels))])
+  1:nrow(probs) %>%
+    map_dbl(~ - log(probs[., labels[.]])) %>%
+    mean
+}
