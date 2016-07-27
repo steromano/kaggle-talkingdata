@@ -55,9 +55,9 @@ params <- list(
   objective = 'multi:softprob',
   num_class = length(unique(getinfo(dtrain, 'label'))),
   booster = 'gbtree',
-  max_depth = 4,
-  eta = 0.01,
-  subsample = 0.5,
+  max_depth = 3,
+  eta = 0.005,
+  subsample = 0.7,
   colsample_bytree = 0.6
 )
 

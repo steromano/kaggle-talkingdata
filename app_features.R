@@ -1,14 +1,13 @@
 source('load.R')
 
 events <- read_raw('events')
-app_events <- read_raw('app_events')
+app_events <- read_raw('app_events') %>% inner_join(select(events, ends_with('_id')))
 app_labels <- read_raw('app_labels')
 label_categories <- read_raw('label_categories')
 
 # Top level: generic apps aggregations
 device_app_counts <- 
   app_events %>%
-  inner_join(select(events, ends_with('_id'))) %>%
   group_by(device_id, event_id) %>%
   summarise(n_installed = n(), n_active = sum(is_active)) %>%
   group_by(device_id) %>%
@@ -27,7 +26,6 @@ device_app_counts <-
 # *this works very well and gives my best features. Consider using more*
 device_apps <-
   app_events %>%
-  inner_join(select(events, ends_with('_id'))) %>%
   group_by(device_id, app_id) %>%
   summarise(times_active = sum(is_active)) %>%
   ungroup
@@ -53,7 +51,8 @@ device_categories <-
   inner_join(app_categories) %>%
   group_by(device_id) %>%
   summarise_each(funs(sum(
-    . * (active_coeff - (active_coeff - 1) * exp(- 0.1 * times_active))
+    .
+    # . * (active_coeff - (active_coeff - 1) * exp(- 0.1 * times_active))
   )), starts_with('appcat'))
 
 # Now reduce the 471 dimensional categories space to a few principal components
@@ -76,50 +75,58 @@ device_categories_pca <-
       set_names(paste0('appcat_comp', 1:ncomp))
   )
 
-# App level: bag of apps + LDA
-# *this is basically rubbish. Condsider getting rid of this entirely*
-device_apps <-
-  app_events %>%
-  inner_join(select(events, ends_with('_id'))) %>%
-  group_by(device_id, app_id) %>%
-  summarise(times_active = sum(is_active)) %>%
-  ungroup
-
-p_rep <- function(x, each) {
-  map2(x, each, rep) %>% unlist
-}
-
+# App level: bag of apps
+# p_rep <- function(x, each) {
+#   map2(x, each, rep) %>% unlist
+# }
 library(FeatureHashing)
 library(slam)
 library(tm)
 library(topicmodels)
-device_bag_of_apps <- 
+device_apps_string <- 
   device_apps %>%
   group_by(device_id) %>%
-  summarise(
-    # Put more weights on active apps by repeating active apps more then 
-    # once. This is sort of experimental
-    apps = p_rep(app_id, 1 + as.integer(times_active > 0)) %>% paste0(collapse = ',')
-  )
+  summarise(apps_string = paste0(app_id, collapse = ','))
 
-apps_lda <- 
-  device_bag_of_apps %>%
-  hashed.model.matrix(~ split(apps, delim = ',') - 1, ., 2^14) %>%
-  as.matrix %>% 
-  as.DocumentTermMatrix(weighting = weightTf) %>%
-  LDA(k = 10)
+device_bag_of_apps <- 
+  device_apps_string %>%
+  hashed.model.matrix(~ split(apps_string, delim = ','), . , 2^14) %>%
+  as.matrix %>%
+  set_colnames(paste0('appbag_hash', 1:ncol(.))) %>%
+  as.data.frame %>%
+  mutate(device_id = device_apps_string$device_id, .) %>%
+  as.tbl
 
-device_apps_lda <-
-  data.frame(
-    device_id = device_bag_of_apps$device_id,
-    posterior(apps_lda)$topics %>% set_colnames(paste0('app_topic', 1:10))
-  )
+# Alternative approach: just count the most popular apps each group,
+# except those that are popular in (almost) every group
+gender_age_train <- read_raw('gender_age_train')
+
+selected_apps <-
+  device_apps %>%
+  inner_join(select(gender_age_train, device_id, group)) %>%
+  count(group, app_id) %>%
+  group_by(group) %>%
+  top_n(300, n) %>%
+  ungroup %>%
+  count(app_id) %>%
+  filter(nn < 10) %$%
+  app_id
+
+device_selected_apps <-
+  device_apps %>%
+  filter(app_id %in% selected_apps) %>%
+  mutate(
+    installed = 1,
+    app_id = paste0('app_', str_replace(app_id, '-', '_'))
+  ) %>%
+  spread(app_id, installed) %>%
+  fillna(0) %>%
+  select(device_id, starts_with('app_'))
 
 device_app_features <-
-  # device_apps_lda %>%
-  # inner_join(device_categories_pca) %>%
   device_categories_pca %>%
-  left_join(device_app_counts) %>%
-  fillna(-1)
+  # inner_join(device_bag_of_apps) %>%
+  inner_join(device_selected_apps) %>%
+  inner_join(device_app_counts) 
 
 write_csv(device_app_features, 'data/clean/device_app_features.csv')
