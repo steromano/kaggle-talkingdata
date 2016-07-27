@@ -9,6 +9,7 @@ expand_grid <- function(...) {
   as.tbl(expand.grid(...))
 }
 
+# ----------------------------
 
 device_model_features <- 
   read_raw('phone_brand_device_model') %>%
@@ -16,7 +17,7 @@ device_model_features <-
   # just encode all this stuff as integers
   mutate_each(funs(encode_as_integer), -device_id)
 
-write_csv(phone_brand_device_model, 'data/clean/device_model_features.csv')
+write_csv(device_model_features, 'data/clean/device_model_features.csv')
 
 gender_age_train <- 
   read_raw('gender_age_train') %>%
@@ -31,7 +32,7 @@ preds_grid <- expand_grid(
 ) %>% inner_join(
   device_model_features %>% distinct(phone_brand, brand_model)
 )
-  
+
 
 # Naive Bayes base model
 nb_nofeatures <- function(data, ...) {
@@ -142,17 +143,18 @@ fit <- nb_base(
 )
 saveRDS(fit, 'models/nb_base_fit.rds')
 
-groupmap <- read_raw('sample_submission') %>% names %>% sort
 test_preds <- 
   read_raw('gender_age_test') %>%
   inner_join(device_model_features) %>%
+  anti_join(read_raw('events')) %>%
   bind_cols(predict(fit, .)) %>%
   select(device_id, matches('[0-9]+')) %>%
   group_by(device_id) %>%
   summarise_each(funs(mean)) %>%
-  set_names(groupmap)
+  set_names(c('device_id', sort(groups)))
 
-test_preds[, names(read_raw('sample_submission'))] %>% write_csv('predictions/base.csv')
+write_preds(test_preds, 'base')
+
 
 
   
