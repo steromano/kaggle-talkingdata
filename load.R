@@ -3,6 +3,7 @@ library(magrittr)
 library(purrr)
 library(readr)
 library(tidyr)
+library(tibble)
 library(stringr)
 library(lubridate)
 

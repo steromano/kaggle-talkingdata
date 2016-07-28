@@ -6,24 +6,24 @@ app_labels <- read_raw('app_labels')
 label_categories <- read_raw('label_categories')
 
 # Top level: generic apps aggregations
-device_app_counts <- 
-  app_events %>%
-  group_by(device_id, event_id) %>%
-  summarise(n_installed = n(), n_active = sum(is_active)) %>%
-  group_by(device_id) %>%
-  summarise(
-    n_events = n(),
-    app_min_installed = min(n_installed),
-    app_max_installed = max(n_installed),
-    app_avg_n_active = mean(n_active)
-  ) %>%
-  mutate(
-    app_avg_n_active = if_else(n_events > 3, app_avg_n_active, -1)
-  ) %>%
-  select(-n_events)
+# device_app_counts <- 
+#   app_events %>%
+#   group_by(device_id, event_id) %>%
+#   summarise(n_installed = n(), n_active = sum(is_active)) %>%
+#   group_by(device_id) %>%
+#   summarise(
+#     n_events = n(),
+#     app_min_installed = min(n_installed),
+#     app_max_installed = max(n_installed),
+#     app_avg_n_active = mean(n_active)
+#   ) %>%
+#   mutate(
+#     app_avg_n_active = if_else(n_events > 3, app_avg_n_active, -1)
+#   ) %>%
+#   select(-n_events)
 
-# Category level: bag of categories + PCA
-# *this works very well and gives my best features. Consider using more*
+# Category level: bag of categories 
+# (+ PCA?)
 device_apps <-
   app_events %>%
   group_by(device_id, app_id) %>%
@@ -42,47 +42,47 @@ app_categories <-
   spread(category, .x) %>%
   fillna(0)
 
-# Count of app categories for each device.
 # Experimental: upweight apps that were actually active rather than
 # just installed
+library(Matrix)
 active_coeff <- 3
-device_categories <-
+device_bag_of_categories <-
   device_apps %>%
   inner_join(app_categories) %>%
   group_by(device_id) %>%
-  summarise_each(funs(sum(
-    .
-    # . * (active_coeff - (active_coeff - 1) * exp(- 0.1 * times_active))
-  )), starts_with('appcat'))
+  summarise_each(funs(
+    # sum(. * (active_coeff - (active_coeff - 1) * exp(- 0.1 * times_active)))
+    sum
+    ), starts_with('appcat')) %>%
+  column_to_rownames('device_id') %>%
+  as.matrix %>%
+  Matrix(sparse = TRUE)
 
 # Now reduce the 471 dimensional categories space to a few principal components
-categories_pca <- 
-  device_categories %>%
-  select(starts_with('appcat')) %>%
-  keep(~ ! all(. == 0)) %>%
-  # Not 100% sure we should scale here but it does
-  # seem to give better decomposition
-  prcomp(scale. = TRUE)
-
-ncomp <- 30
-device_categories_pca <-
-  bind_cols(
-    select(device_categories, -starts_with('appcat')),
-    select(device_categories, starts_with('appcat')) %>%
-      predict(categories_pca, .) %>%
-      as.data.frame %>%
-      select(1:ncomp) %>%
-      set_names(paste0('appcat_comp', 1:ncomp))
-  )
+# categories_pca <- 
+#   device_categories %>%
+#   select(starts_with('appcat')) %>%
+#   keep(~ ! all(. == 0)) %>%
+#   # Not 100% sure we should scale here but it does
+#   # seem to give better decomposition
+#   prcomp(scale. = TRUE)
+# 
+# ncomp <- 30
+# device_categories_pca <-
+#   bind_cols(
+#     select(device_categories, -starts_with('appcat')),
+#     select(device_categories, starts_with('appcat')) %>%
+#       predict(categories_pca, .) %>%
+#       as.data.frame %>%
+#       select(1:ncomp) %>%
+#       set_names(paste0('appcat_comp', 1:ncomp))
+#   )
 
 # App level: bag of apps
 # p_rep <- function(x, each) {
 #   map2(x, each, rep) %>% unlist
 # }
 library(FeatureHashing)
-library(slam)
-library(tm)
-library(topicmodels)
 device_apps_string <- 
   device_apps %>%
   group_by(device_id) %>%
@@ -91,42 +91,11 @@ device_apps_string <-
 device_bag_of_apps <- 
   device_apps_string %>%
   hashed.model.matrix(~ split(apps_string, delim = ','), . , 2^14) %>%
-  as.matrix %>%
-  set_colnames(paste0('appbag_hash', 1:ncol(.))) %>%
-  as.data.frame %>%
-  mutate(device_id = device_apps_string$device_id, .) %>%
-  as.tbl
-
-# Alternative approach: just count the most popular apps each group,
-# except those that are popular in (almost) every group
-gender_age_train <- read_raw('gender_age_train')
-
-selected_apps <-
-  device_apps %>%
-  inner_join(select(gender_age_train, device_id, group)) %>%
-  count(group, app_id) %>%
-  group_by(group) %>%
-  top_n(300, n) %>%
-  ungroup %>%
-  count(app_id) %>%
-  filter(nn < 10) %$%
-  app_id
-
-device_selected_apps <-
-  device_apps %>%
-  filter(app_id %in% selected_apps) %>%
-  mutate(
-    installed = 1,
-    app_id = paste0('app_', str_replace(app_id, '-', '_'))
-  ) %>%
-  spread(app_id, installed) %>%
-  fillna(0) %>%
-  select(device_id, starts_with('app_'))
+  set_rownames(device_apps_string$device_id) %>%
+  set_colnames(paste0('apphash_', 1:ncol(.)))
 
 device_app_features <-
-  device_categories_pca %>%
-  # inner_join(device_bag_of_apps) %>%
-  inner_join(device_selected_apps) %>%
-  inner_join(device_app_counts) 
+  cbind(device_bag_of_categories, device_bag_of_apps)
+  
 
-write_csv(device_app_features, 'data/clean/device_app_features.csv')
+saveRDS(device_app_features, 'data/clean/device_app_features.rds')
