@@ -9,10 +9,11 @@ library(lubridate)
 
 read_data <- function(file, ...) {
   suppressWarnings(
-      paste0(file, '.csv') %>%
+    paste0(file, '.csv') %>%
       read_csv(col_types = cols(
         app_id = col_character(),
-        device_id = col_character() 
+        device_id = col_character(),
+        value = col_double()
       ), ...)
   )
 }
@@ -55,4 +56,21 @@ cross_entropy <- function(probs, labels) {
   1:nrow(probs) %>%
     map_dbl(~ - log(probs[., labels[.]])) %>%
     mean
+}
+
+as_sparse_matrix <- function(long_tbl) {
+  require(Matrix)
+  
+  id <- names(long_tbl)[1]
+  key <- names(long_tbl)[2]
+  value <- names(long_tbl)[3]
+  row_nms <- unique(long_tbl[[id]])
+  col_nms <- unique(long_tbl[[key]])
+  
+  sparseMatrix(
+    i = match(long_tbl[[id]], row_nms),
+    j = match(long_tbl[[key]], col_nms),
+    x = long_tbl[[value]],
+    dimnames = list(row_nms, col_nms)
+  )
 }

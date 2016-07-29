@@ -6,21 +6,19 @@ app_labels <- read_raw('app_labels')
 label_categories <- read_raw('label_categories')
 
 # Top level: generic apps aggregations
-# device_app_counts <- 
-#   app_events %>%
-#   group_by(device_id, event_id) %>%
-#   summarise(n_installed = n(), n_active = sum(is_active)) %>%
-#   group_by(device_id) %>%
-#   summarise(
-#     n_events = n(),
-#     app_min_installed = min(n_installed),
-#     app_max_installed = max(n_installed),
-#     app_avg_n_active = mean(n_active)
-#   ) %>%
-#   mutate(
-#     app_avg_n_active = if_else(n_events > 3, app_avg_n_active, -1)
-#   ) %>%
-#   select(-n_events)
+device_app_counts <-
+  app_events %>%
+  group_by(device_id, event_id) %>%
+  summarise(n_installed = n(), n_active = sum(is_active)) %>%
+  group_by(device_id) %>%
+  summarise(
+    n_events = n(),
+    app_min_installed = min(n_installed),
+    app_max_installed = max(n_installed),
+    app_avg_n_active = mean(n_active)
+  ) %>%
+  select(-n_events) %>%
+  gather(feature, value, -device_id)
 
 # Category level: bag of categories 
 # (+ PCA?)
@@ -44,19 +42,16 @@ app_categories <-
 
 # Experimental: upweight apps that were actually active rather than
 # just installed
-library(Matrix)
 active_coeff <- 3
 device_bag_of_categories <-
   device_apps %>%
   inner_join(app_categories) %>%
   group_by(device_id) %>%
   summarise_each(funs(
-    # sum(. * (active_coeff - (active_coeff - 1) * exp(- 0.1 * times_active)))
-    sum
+    sum(. * (active_coeff - (active_coeff - 1) * exp(- 0.1 * times_active)))
+    # sum
     ), starts_with('appcat')) %>%
-  column_to_rownames('device_id') %>%
-  as.matrix %>%
-  Matrix(sparse = TRUE)
+  gather(feature, value, -device_id)
 
 # Now reduce the 471 dimensional categories space to a few principal components
 # categories_pca <- 
@@ -83,6 +78,7 @@ device_bag_of_categories <-
 #   map2(x, each, rep) %>% unlist
 # }
 library(FeatureHashing)
+library(slam)
 device_apps_string <- 
   device_apps %>%
   group_by(device_id) %>%
@@ -90,12 +86,23 @@ device_apps_string <-
 
 device_bag_of_apps <- 
   device_apps_string %>%
-  hashed.model.matrix(~ split(apps_string, delim = ','), . , 2^14) %>%
+  hashed.model.matrix(~ split(apps_string, delim = ',', type = 'tf-idf'), . , 2^14) %>%
   set_rownames(device_apps_string$device_id) %>%
-  set_colnames(paste0('apphash_', 1:ncol(.)))
+  set_colnames(paste0('apphash_', 1:ncol(.))) %>%
+  as.simple_triplet_matrix %>% {
+    data_frame(
+      device_id = .$dimnames[[1]][.$i],
+      feature = .$dimnames[[2]][.$j],
+      value = .$v
+    )
+  } %>%
+  filter(value > 0)
 
-device_app_features <-
-  cbind(device_bag_of_categories, device_bag_of_apps)
-  
+device_app_features <- bind_rows(
+  device_app_counts,
+  device_bag_of_apps,
+  device_bag_of_categories
+)
+ 
+write_csv(device_app_features, 'data/clean/device_app_features.csv') 
 
-saveRDS(device_app_features, 'data/clean/device_app_features.rds')

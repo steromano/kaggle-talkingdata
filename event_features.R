@@ -4,14 +4,14 @@ events <- read_raw('events')
 
 events_by_time <- 
   events %>%
-  mutate(timeslot = paste0('event_timeslot', hour(timestamp) %/% 4)) %>%
-  count(device_id, timeslot) %>%
+  mutate(hour = paste0('event_hour', hour(timestamp))) %>%
+  count(device_id, hour) %>%
   group_by(device_id) %>%
   mutate(event_n = sum(n)) %>%
   ungroup %>%
-  spread(timeslot, n) %>%
+  spread(hour, n) %>%
   fillna(0) %>%
-  mutate_each(funs(. / event_n), starts_with('event_timeslot'))
+  mutate_each(funs(. / event_n), starts_with('event_hour'))
 
 events_location <- 
   events %>%
@@ -26,6 +26,7 @@ events_location <-
 events_features <- 
   events_by_time %>%
   left_join(events_location) %>%
-  fillna(-1)
+  fillna(-1) %>%
+  gather(feature, value, -device_id)
 
 write_csv(events_features, 'data/clean/device_event_features.csv')
